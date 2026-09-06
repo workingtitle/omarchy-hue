@@ -1,0 +1,418 @@
+import QtQuick
+import QtQuick.Controls
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+
+Panel {
+  id: root
+  moduleName: "io.github.workingtitle.hue"
+  ipcTarget: "io.github.workingtitle.hue"
+  manageIpc: false
+
+  property var anchorItem: null
+  property var hostWidget: null
+  readonly property var barIdentity: hostWidget || root
+  property var lights: []
+  property int onCount: 0
+  property bool configured: false
+  property bool loading: false
+  property string message: "Loading…"
+  property string bridgeAddress: setting("bridge", "")
+  property string output: ""
+  property var pendingActionArgs: null
+  property string selectedLightId: ""
+  property real detailHue: 0
+  property real detailSaturation: 100
+  readonly property color detailColor: Qt.hsla(detailHue / 360, detailSaturation / 100, 0.5, 1)
+  readonly property string script: Qt.resolvedUrl("huectl.py").toString().replace("file://", "")
+  readonly property string tooltip: configured
+    ? (onCount + " of " + lights.length + " Hue lights on")
+    : "Set up Philips Hue"
+  readonly property color foreground: bar ? bar.foreground : Color.foreground
+  readonly property color dim: Qt.darker(foreground, 1.55)
+  readonly property color accent: bar ? bar.foreground : Color.accent
+
+  function run(args) {
+    if (backend.running) return
+    output = ""
+    loading = true
+    backend.command = ["python3", script].concat(args)
+    backend.running = true
+  }
+  function refresh() { run(["status"]) }
+  function discover() { run(["discover"]) }
+  function pair() {
+    var address = bridgeField.text.trim()
+    if (address === "") { message = "Find a bridge or enter its IP address first"; return }
+    run(["pair", address])
+  }
+  function setLight(id, on, brightness) {
+    var args = ["set", id]
+    if (on !== undefined && on !== null) args.push("--on", on ? "true" : "false")
+    if (brightness !== undefined && brightness !== null) args.push("--brightness", String(Math.round(brightness)))
+    run(args)
+  }
+  function setColor(light, color) {
+    var args = ["set", light.id, "--color", color]
+    if (light.gamut) args.push("--gamut", JSON.stringify(light.gamut))
+    queueAction(args, "Setting color for " + light.name + "…")
+  }
+  function setTemperature(light, mirek) {
+    var bounded = Math.max(light.mirek_min || 153, Math.min(light.mirek_max || 500, mirek))
+    queueAction(["set", light.id, "--mirek", String(Math.round(bounded))], "Setting white tone for " + light.name + "…")
+  }
+  function queueAction(args, statusMessage) {
+    message = statusMessage
+    if (backend.running) {
+      pendingActionArgs = args
+      return
+    }
+    run(args)
+  }
+  function selectedLight() {
+    for (var i = 0; i < lights.length; i++) if (lights[i].id === selectedLightId) return lights[i]
+    return null
+  }
+  function showLight(light) {
+    selectedLightId = light.id
+    detailHue = 0
+    detailSaturation = 100
+  }
+  function showOverview() { selectedLightId = "" }
+  function setAll(desired) {
+    if (lights.length === 0 || backend.running) return
+    batchQueue = []
+    for (var i = 0; i < lights.length; i++) batchQueue.push(["set", lights[i].id, "--on", desired ? "true" : "false"])
+    runNextBatch()
+  }
+  property var batchQueue: []
+  function runNextBatch() {
+    if (batchQueue.length === 0) { refresh(); return }
+    var next = batchQueue.shift()
+    run(next)
+  }
+  function open() { controller.show(); Qt.callLater(refresh) }
+  function close() { controller.hide() }
+  function toggle() { opened ? close() : open() }
+  function closeForPopoutSwitch() { controller.hide() }
+
+  Process {
+    id: backend
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.output = text }
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function(exitCode) {
+      loading = false
+      var data
+      try { data = JSON.parse(output || "{}") }
+      catch (e) { message = "Invalid response from the Hue client"; return }
+      if (batchQueue.length > 0) { runNextBatch(); return }
+      if (command.indexOf("discover") >= 0 && data.ok) {
+        if (data.bridges.length > 0) {
+          bridgeAddress = data.bridges[0].bridge
+          bridgeField.text = bridgeAddress
+          message = data.bridges.length === 1 ? "Bridge found. Press its link button, then select Pair." : data.bridges.length + " bridges found; selected the first one."
+        } else message = "No Hue Bridge found"
+      } else if (command.indexOf("pair") >= 0 && data.ok) {
+        configured = true
+        message = "Paired"
+        refreshTimer.start()
+      } else if (command.indexOf("status") >= 0) {
+        configured = data.configured === true
+        if (data.ok) {
+          lights = data.lights || []
+          onCount = data.on_count || 0
+          bridgeAddress = data.bridge || bridgeAddress
+          message = lights.length === 0 ? "No reachable lights found" : onCount + " of " + lights.length + " lights on"
+        } else message = data.error || "Hue Bridge is unreachable"
+      } else if (!data.ok) message = data.error || "Action failed"
+      else refreshTimer.start()
+      if (pendingActionArgs) {
+        var pending = pendingActionArgs
+        pendingActionArgs = null
+        Qt.callLater(function() { root.run(pending) })
+      }
+    }
+  }
+
+  Timer { id: refreshTimer; interval: 350; onTriggered: root.refresh() }
+  Timer { interval: 15000; running: root.opened; repeat: true; onTriggered: root.refresh() }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: root.anchorItem
+    owner: root.barIdentity
+    bar: root.bar
+    open: root.opened
+    centerOnBar: false
+    contentWidth: fittedContentWidth(Style.space(440))
+    contentHeight: fittedContentHeight(content.implicitHeight)
+
+    Item {
+      anchors.fill: parent
+
+      Column {
+        id: content
+        width: parent.width
+        spacing: Style.space(10)
+
+        Item {
+          width: parent.width
+          height: Style.space(28)
+          Row {
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(5)
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.selectedLightId === ""
+              text: "PHILIPS HUE"
+              color: root.foreground
+              font.family: bar ? bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.heading
+              font.bold: true
+            }
+            PanelActionButton {
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.selectedLightId === ""
+              iconText: "↻"
+              tooltipText: "Refresh lights"
+              foreground: root.foreground
+              fontFamily: bar ? bar.fontFamily : Style.font.family
+              enabled: !root.loading
+              onClicked: root.refresh()
+            }
+            Button {
+              anchors.verticalCenter: parent.verticalCenter
+              visible: root.selectedLightId !== ""
+              text: "‹ Back"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: bar ? bar.fontFamily : Style.font.family
+              onClicked: root.showOverview()
+            }
+          }
+          Row {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(6)
+            Rectangle {
+              anchors.verticalCenter: parent.verticalCenter
+              width: Style.space(7); height: width; radius: width / 2
+              color: root.loading ? root.dim : (root.onCount > 0 ? Color.accent : root.dim)
+            }
+            Text {
+              text: root.loading
+                ? "Refreshing…"
+                : (root.lights.length > 0 ? root.onCount + " / " + root.lights.length + " on" : "")
+              color: root.dim
+              font.family: bar ? bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+        }
+        Text {
+          width: parent.width
+          text: root.loading ? "Refreshing…" : root.message
+          visible: !root.configured
+          color: root.dim
+          wrapMode: Text.Wrap
+          font.family: bar ? bar.fontFamily : Style.font.family
+        }
+
+        Column {
+          visible: !root.configured
+          width: parent.width
+          spacing: Style.space(8)
+          Text { width: parent.width; text: "1. Find bridge  2. Press link button  3. Pair"; color: root.foreground; wrapMode: Text.Wrap; font.family: bar ? bar.fontFamily : Style.font.family }
+          TextField {
+            id: bridgeField
+            width: parent.width
+            placeholderText: "Bridge IP, e.g. 192.168.1.20"
+            text: root.bridgeAddress
+          }
+          Row {
+            spacing: Style.space(8)
+            Button { text: "Find bridge"; bordered: true; enabled: !root.loading; onClicked: root.discover() }
+            Button { text: "Pair"; bordered: true; enabled: !root.loading && bridgeField.text.trim() !== ""; onClicked: root.pair() }
+          }
+        }
+
+        Column {
+          visible: root.selectedLightId === ""
+          width: parent.width
+          spacing: 0
+
+          Repeater {
+            model: root.lights
+            delegate: Rectangle {
+              id: compactLight
+              required property var modelData
+              width: content.width
+              height: Style.space(40)
+              color: rowMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+
+              Rectangle {
+                anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                height: 1
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.1)
+              }
+
+              Text {
+                anchors.left: parent.left; anchors.leftMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.name
+                color: root.foreground
+                font.family: bar ? bar.fontFamily : Style.font.family
+              }
+              Text {
+                anchors.right: rowSwitch.left; anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.brightness + "%  ›"
+                color: root.dim
+                font.family: bar ? bar.fontFamily : Style.font.family
+              }
+              ToggleSwitch {
+                id: rowSwitch
+                anchors.right: parent.right; anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                checked: modelData.on
+                busy: root.loading
+                foreground: root.foreground
+                accent: Color.accent
+                trackHeight: Style.space(18)
+                onToggled: root.setLight(modelData.id, !checked, null)
+              }
+              MouseArea {
+                id: rowMouse
+                anchors.left: parent.left; anchors.right: rowSwitch.left
+                anchors.top: parent.top; anchors.bottom: parent.bottom
+                hoverEnabled: true
+                onClicked: root.showLight(compactLight.modelData)
+              }
+            }
+          }
+
+          Row {
+            id: overviewActions
+            visible: root.configured && root.lights.length > 0
+            width: parent.width
+            topPadding: Style.space(10)
+            spacing: Style.space(8)
+            readonly property real actionWidth: (width - spacing) / 2
+            Button { width: overviewActions.actionWidth; text: "All on"; bordered: true; enabled: !root.loading; onClicked: root.setAll(true) }
+            Button { width: overviewActions.actionWidth; text: "All off"; bordered: true; enabled: !root.loading; onClicked: root.setAll(false) }
+          }
+        }
+
+        Column {
+          id: detailView
+          readonly property var light: root.selectedLight()
+          visible: root.selectedLightId !== "" && light !== null
+          width: parent.width
+          spacing: Style.space(10)
+
+          Row {
+            width: parent.width
+            Text {
+              anchors.verticalCenter: parent.verticalCenter
+              text: detailView.light ? detailView.light.name : ""
+              color: root.foreground
+              font.family: bar ? bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.title
+              font.bold: true
+            }
+          }
+
+          Toggle {
+            width: parent.width
+            label: "Power"
+            description: detailView.light && detailView.light.on ? "On" : "Off"
+            checked: detailView.light ? detailView.light.on : false
+            foreground: root.foreground
+            accent: Color.accent
+            fontFamily: bar ? bar.fontFamily : Style.font.family
+            onClicked: if (detailView.light) root.setLight(detailView.light.id, !checked, null)
+          }
+
+          PanelSeparator { foreground: root.foreground }
+          PanelSectionHeader { text: "BRIGHTNESS"; foreground: root.foreground; fontFamily: bar ? bar.fontFamily : Style.font.family }
+          HueSlider {
+            width: parent.width
+            bar: root.bar
+            minimum: 1; maximum: 100
+            integer: true
+            wheelStep: 5
+            value: detailView.light ? detailView.light.brightness : 1
+            onAdjusted: detailBrightnessDebounce.restart()
+            Timer { id: detailBrightnessDebounce; interval: 250; onTriggered: if (detailView.light) root.setLight(detailView.light.id, null, parent.value) }
+          }
+
+          Column {
+            visible: detailView.light ? detailView.light.temperature_capable : false
+            width: parent.width
+            spacing: Style.space(6)
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader { text: "WHITE TONE"; foreground: root.foreground; fontFamily: bar ? bar.fontFamily : Style.font.family }
+            Row {
+              id: whiteButtons
+              width: parent.width
+              spacing: Style.space(8)
+              readonly property real buttonWidth: (width - spacing * 2) / 3
+              Button { width: whiteButtons.buttonWidth; text: "Warm"; bordered: true; onClicked: root.setTemperature(detailView.light, 370) }
+              Button { width: whiteButtons.buttonWidth; text: "Neutral"; bordered: true; onClicked: root.setTemperature(detailView.light, 250) }
+              Button { width: whiteButtons.buttonWidth; text: "Cool"; bordered: true; onClicked: root.setTemperature(detailView.light, 153) }
+            }
+          }
+
+          Column {
+            visible: detailView.light ? detailView.light.color_capable : false
+            width: parent.width
+            spacing: Style.space(4)
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader { text: "COLOR"; foreground: root.foreground; fontFamily: bar ? bar.fontFamily : Style.font.family }
+            Column {
+              width: parent.width
+              spacing: Style.space(2)
+              Text { text: "Hue"; color: root.foreground }
+              HueSlider {
+                width: parent.width; bar: root.bar; minimum: 0; maximum: 360; wheelStep: 15; value: root.detailHue
+                fillColor: root.detailColor
+                knobColor: root.detailColor
+                onAdjusted: function(adjustedValue) { root.detailHue = adjustedValue; detailColorDebounce.restart() }
+              }
+            }
+            Column {
+              width: parent.width
+              spacing: Style.space(2)
+              Item {
+                width: parent.width
+                height: Style.font.body
+                Text { anchors.left: parent.left; text: "Saturation"; color: root.foreground }
+                Rectangle {
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(16); height: width; radius: width / 2
+                  color: root.detailColor
+                  border.width: 1; border.color: root.foreground
+                }
+              }
+              HueSlider {
+                width: parent.width; bar: root.bar; minimum: 0; maximum: 100; wheelStep: 8; value: root.detailSaturation
+                fillColor: root.detailColor
+                knobColor: root.detailColor
+                onAdjusted: function(adjustedValue) { root.detailSaturation = adjustedValue; detailColorDebounce.restart() }
+              }
+            }
+            Timer {
+              id: detailColorDebounce
+              interval: 250
+              onTriggered: if (detailView.light) root.setColor(detailView.light, root.detailColor.toString())
+            }
+          }
+        }
+      }
+    }
+  }
+}

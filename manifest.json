@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.workingtitle.hue",
+  "name": "Philips Hue",
+  "version": "1.0.0",
+  "author": "workingtitle",
+  "license": "MIT",
+  "description": "Control Philips Hue lights from the Omarchy bar",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Philips Hue",
+    "description": "Lights, brightness and bridge status",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
