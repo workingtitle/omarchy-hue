@@ -2,6 +2,8 @@
 
 Control Philips Hue lights directly from the Omarchy bar through the local Hue Bridge API v2. After initial bridge discovery, status queries and control commands remain on the local network and do not require a cloud account.
 
+![Philips Hue light controls in the Omarchy bar](preview.png)
+
 ## Requirements
 
 - Omarchy Quattro with the plugin-capable shell
