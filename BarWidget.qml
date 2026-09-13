@@ -46,6 +46,10 @@ BarWidget {
     function refresh(): void { root.refresh() }
   }
 
+  // Keep the widget out of the bar until a local Hue Bridge with lights is
+  // available. While the panel is open, keep it mounted so an outage can be
+  // reported and the panel can be closed normally.
+  visible: panelLoader.item && (panelLoader.item.present || panelLoader.item.opened)
   BarIconButton {
     id: button
     anchors.fill: parent

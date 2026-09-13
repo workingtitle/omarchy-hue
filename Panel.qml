@@ -17,16 +17,21 @@ Panel {
   property var lights: []
   property int onCount: 0
   property bool configured: false
+  property bool present: false
   property bool loading: false
   property string message: "Loading…"
   property string bridgeAddress: setting("bridge", "")
   property string output: ""
+  property bool outputTooLarge: false
   property var pendingActionArgs: null
   property string selectedLightId: ""
   property real detailHue: 0
   property real detailSaturation: 100
   readonly property color detailColor: Qt.hsla(detailHue / 360, detailSaturation / 100, 0.5, 1)
   readonly property string script: Qt.resolvedUrl("huectl.py").toString().replace("file://", "")
+  readonly property int maxHelperOutputLength: 1024 * 1024
+  readonly property int maxDisplayTextLength: 240
+  readonly property int maxLightNameLength: 128
   readonly property string tooltip: configured
     ? (onCount + " of " + lights.length + " Hue lights on")
     : "Set up Philips Hue"
@@ -37,11 +42,18 @@ Panel {
   function run(args) {
     if (backend.running) return
     output = ""
+    outputTooLarge = false
     loading = true
     backend.command = ["python3", script].concat(args)
     backend.running = true
   }
+  function boundedText(value, fallback, limit) {
+    var text = value === undefined || value === null ? fallback : String(value)
+    text = text.replace(/\u0000/g, "")
+    return text.length <= limit ? text : text.slice(0, Math.max(1, limit - 1)) + "…"
+  }
   function refresh() { run(["status"]) }
+  function refreshPresence() { run(["presence"]) }
   function discover() { run(["discover"]) }
   function pair() {
     var address = bridgeField.text.trim()
@@ -57,14 +69,14 @@ Panel {
   function setColor(light, color) {
     var args = ["set", light.id, "--color", color]
     if (light.gamut) args.push("--gamut", JSON.stringify(light.gamut))
-    queueAction(args, "Setting color for " + light.name + "…")
+    queueAction(args, "Setting color for " + boundedText(light.name, "Light", maxLightNameLength) + "…")
   }
   function setTemperature(light, mirek) {
     var bounded = Math.max(light.mirek_min || 153, Math.min(light.mirek_max || 500, mirek))
-    queueAction(["set", light.id, "--mirek", String(Math.round(bounded))], "Setting white tone for " + light.name + "…")
+    queueAction(["set", light.id, "--mirek", String(Math.round(bounded))], "Setting white tone for " + boundedText(light.name, "Light", maxLightNameLength) + "…")
   }
   function queueAction(args, statusMessage) {
-    message = statusMessage
+    message = boundedText(statusMessage, "Working…", maxDisplayTextLength)
     if (backend.running) {
       pendingActionArgs = args
       return
@@ -98,12 +110,21 @@ Panel {
   function toggle() { opened ? close() : open() }
   function closeForPopoutSwitch() { controller.hide() }
 
+  Component.onCompleted: Qt.callLater(root.refreshPresence)
+
   Process {
     id: backend
-    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.output = text }
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.outputTooLarge = text.length > root.maxHelperOutputLength
+        root.output = root.outputTooLarge ? "" : text
+      }
+    }
     stderr: StdioCollector { waitForEnd: true }
     onExited: function(exitCode) {
       loading = false
+      if (outputTooLarge) { message = "Hue client response is too large"; return }
       var data
       try { data = JSON.parse(output || "{}") }
       catch (e) { message = "Invalid response from the Hue client"; return }
@@ -118,15 +139,38 @@ Panel {
         configured = true
         message = "Paired"
         refreshTimer.start()
+      } else if (command.indexOf("presence") >= 0) {
+        configured = data.configured === true
+        if (data.ok) {
+          present = data.present === true
+          if (data.bridge) bridgeAddress = data.bridge
+          if (configured) {
+            lights = data.lights || []
+            onCount = data.on_count || 0
+            message = lights.length === 0 ? "No reachable lights found" : onCount + " of " + lights.length + " lights on"
+          } else {
+            lights = []
+            onCount = 0
+            if (data.bridges && data.bridges.length > 0 && bridgeAddress === "") bridgeAddress = data.bridges[0].bridge
+            message = present ? "Hue Bridge found. Pair it to control your lights." : "No local Hue Bridge found"
+          }
+        } else {
+          present = false
+          message = root.boundedText(data.error, "Hue Bridge is unreachable", root.maxDisplayTextLength)
+        }
       } else if (command.indexOf("status") >= 0) {
         configured = data.configured === true
         if (data.ok) {
           lights = data.lights || []
           onCount = data.on_count || 0
+          present = lights.length > 0
           bridgeAddress = data.bridge || bridgeAddress
           message = lights.length === 0 ? "No reachable lights found" : onCount + " of " + lights.length + " lights on"
-        } else message = data.error || "Hue Bridge is unreachable"
-      } else if (!data.ok) message = data.error || "Action failed"
+        } else {
+          if (data.configured === true) present = false
+          message = root.boundedText(data.error, "Hue Bridge is unreachable", root.maxDisplayTextLength)
+        }
+      } else if (!data.ok) message = root.boundedText(data.error, "Action failed", root.maxDisplayTextLength)
       else refreshTimer.start()
       if (pendingActionArgs) {
         var pending = pendingActionArgs
@@ -137,6 +181,7 @@ Panel {
   }
 
   Timer { id: refreshTimer; interval: 350; onTriggered: root.refresh() }
+  Timer { interval: 30000; running: true; repeat: true; onTriggered: root.refreshPresence() }
   Timer { interval: 15000; running: root.opened; repeat: true; onTriggered: root.refresh() }
 
   KeyboardPanel {
@@ -215,6 +260,7 @@ Panel {
         Text {
           width: parent.width
           text: root.loading ? "Refreshing…" : root.message
+          textFormat: Text.PlainText
           visible: !root.configured
           color: root.dim
           wrapMode: Text.Wrap
@@ -262,7 +308,8 @@ Panel {
               Text {
                 anchors.left: parent.left; anchors.leftMargin: Style.space(10)
                 anchors.verticalCenter: parent.verticalCenter
-                text: modelData.name
+                text: root.boundedText(modelData.name, "Light", root.maxLightNameLength)
+                textFormat: Text.PlainText
                 color: root.foreground
                 font.family: bar ? bar.fontFamily : Style.font.family
               }
@@ -317,7 +364,8 @@ Panel {
             width: parent.width
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: detailView.light ? detailView.light.name : ""
+              text: root.boundedText(detailView.light ? detailView.light.name : "", "", root.maxLightNameLength)
+              textFormat: Text.PlainText
               color: root.foreground
               font.family: bar ? bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.title

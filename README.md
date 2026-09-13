@@ -22,6 +22,11 @@ The widget is placed in the right bar section by default. Move it when desired:
 omarchy bar move io.github.workingtitle.hue --section right
 ```
 
+The bar icon is shown only while a Hue Bridge is present on the local network.
+After pairing, the plugin additionally requires at least one reachable Hue light.
+Presence checks use local SSDP discovery and the local Hue Bridge API; the cloud
+discovery endpoint is used only by the manual **Find bridge** setup action.
+
 ## Pair the bridge
 
 1. Select the light bulb icon in the Omarchy bar.
@@ -55,7 +60,11 @@ Removing the plugin does not delete the Hue application key. To revoke access co
 
 ## Security
 
-Omarchy plugins run unsandboxed with user permissions. This plugin executes its bundled Python client and communicates with the configured Hue Bridge over the local network. Initial automatic discovery uses `https://discovery.meethue.com/` once. It does not use `sudo`, install packages, or execute downloaded code.
+Omarchy plugins run unsandboxed with user permissions. This plugin executes its bundled Python client and communicates with the configured Hue Bridge over the local network. All bridge API and pairing requests use HTTPS with the Philips Hue bridge root CAs pinned in the client. The bridge certificate's ID must match the bridge ID returned by the authenticated TLS connection; that ID is stored alongside the application key and is checked on every later request. A pairing response is validated before the application key is stored.
+
+HTTP responses are bounded before JSON parsing, including error and discovery responses, and resource, light, name, and displayed error sizes are limited. Dynamic bridge data is rendered as plain text in the panel. Initial automatic discovery uses `https://discovery.meethue.com/` only for the manual **Find bridge** setup action. It does not use `sudo`, install packages, or execute downloaded code.
+
+The pinned roots follow Philips Hue's [HTTPS application design guidance](https://developers.meethue.com/develop/application-design-guidance/using-https/).
 
 ## License
 

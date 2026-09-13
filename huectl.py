@@ -5,43 +5,178 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ipaddress
 import json
 import math
 import os
+import re
 import socket
 import ssl
 import sys
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy" / "hue"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_HELPER_OUTPUT_BYTES = 1024 * 1024
+MAX_DISCOVERY_BYTES = 64 * 1024
+MAX_ERROR_BYTES = 4 * 1024
+MAX_ERROR_TEXT = 240
+MAX_RESOURCES = 4096
+MAX_LIGHTS = 1024
+MAX_BRIDGES = 32
+MAX_LIGHT_NAME = 128
+BRIDGE_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{16}$")
+APP_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{8,128}$")
+
+# Philips Hue's documented local-bridge trust roots. The older root-bridge
+# CA covers the bridge currently in use; the Signify Hue Root CA covers newer
+# firmware. Hostname checking is disabled because bridge certificates use the
+# bridge ID as CN and normally do not contain an IP SAN. The CN is checked
+# against the bridge identity returned by the same verified connection.
+# Source: https://developers.meethue.com/develop/application-design-guidance/using-https/
+HUE_BRIDGE_ROOT_CAS = """-----BEGIN CERTIFICATE-----
+MIICMjCCAdigAwIBAgIUO7FSLbaxikuXAljzVaurLXWmFw4wCgYIKoZIzj0EAwIw
+OTELMAkGA1UEBhMCTkwxFDASBgNVBAoMC1BoaWxpcHMgSHVlMRQwEgYDVQQDDAty
+b290LWJyaWRnZTAiGA8yMDE3MDEwMTAwMDAwMFoYDzIwMzgwMTE5MDMxNDA3WjA5
+MQswCQYDVQQGEwJOTDEUMBIGA1UECgwLUGhpbGlwcyBIdWUxFDASBgNVBAMMC3Jv
+b3QtYnJpZGdlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEjNw2tx2AplOf9x86
+aTdvEcL1FU65QDxziKvBpW9XXSIcibAeQiKxegpq8Exbr9v6LBnYbna2VcaK0G22
+jOKkTqOBuTCBtjAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBhjAdBgNV
+HQ4EFgQUZ2ONTFrDT6o8ItRnKfqWKnHFGmQwdAYDVR0jBG0wa4AUZ2ONTFrDT6o8
+ItRnKfqWKnHFGmShPaQ7MDkxCzAJBgNVBAYTAk5MMRQwEgYDVQQKDAtQaGlsaXBz
+IEh1ZTEUMBIGA1UEAwwLcm9vdC1icmlkZ2WCFDuxUi22sYpLlwJY81Wrqy11phcO
+MAoGCCqGSM49BAMCA0gAMEUCIEBYYEOsa07TH7E5MJnGw557lVkORgit2Rm1h3B2
+sFgDAiEA1Fj/C3AN5psFMjo0//mrQebo0eKd3aWRx+pQY08mk48=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIBzDCCAXOgAwIBAgICEAAwCgYIKoZIzj0EAwIwPDELMAkGA1UEBhMCTkwxFDAS
+BgNVBAoMC1NpZ25pZnkgSHVlMRcwFQYDVQQDDA5IdWUgUm9vdCBDQSAwMTAgFw0y
+NTAyMjUwMDAwMDBaGA8yMDUwMTIzMTIzNTk1OVowPDELMAkGA1UEBhMCTkwxFDAS
+BgNVBAoMC1NpZ25pZnkgSHVlMRcwFQYDVQQDDA5IdWUgUm9vdCBDQSAwMTBZMBMG
+ByqGSM49AgEGCCqGSM49AwEHA0IABFfOO0jfSAUXGQ9kjEDzyBrcMQ3ItyA5krE+
+cyvb1Y3xFti7KlAad8UOnAx0FBLn7HZrlmIwm1QnX0fK3LPM13mjYzBhMB0GA1Ud
+DgQWBBTF1pSpsCASX/z0VHLigxU2CAaqoTAfBgNVHSMEGDAWgBTF1pSpsCASX/z0
+VHLigxU2CAaqoTAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjAKBggq
+hkjOPQQDAgNHADBEAiAk7duT+IHbOGO4UUuGLAEpyYejGZK9Z7V9oSfnvuQ5BQIg
+IYSgwwxHXm73/JgcU9lAM6c8Bmu3UE3kBIUwBs1qXFw=
+-----END CERTIFICATE-----
+"""
+
 
 def emit(value, code=0):
-    print(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if len(payload) > MAX_HELPER_OUTPUT_BYTES:
+        payload = b'{"ok":false,"error":"Hue client output exceeds its size limit"}'
+        code = 1
+    sys.stdout.write(payload.decode("utf-8") + "\n")
     raise SystemExit(code)
 
 
 def load_config():
     try:
         data = json.loads(CONFIG_FILE.read_text())
-        return {"bridge": str(data.get("bridge", "")).strip(), "app_key": str(data.get("app_key", "")).strip()}
+        return {
+            "bridge": str(data.get("bridge", "")).strip(),
+            "app_key": str(data.get("app_key", "")).strip(),
+            "bridge_id": str(data.get("bridge_id", "")).strip(),
+        }
     except (OSError, ValueError, TypeError):
-        return {"bridge": "", "app_key": ""}
+        return {"bridge": "", "app_key": "", "bridge_id": ""}
 
 
-def save_config(bridge, app_key):
+def save_config(bridge, app_key, bridge_id=""):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(CONFIG_DIR, 0o700)
     temp = CONFIG_FILE.with_suffix(".tmp")
-    temp.write_text(json.dumps({"bridge": bridge, "app_key": app_key}, indent=2) + "\n")
+    data = {"bridge": bridge, "app_key": app_key}
+    if bridge_id:
+        data["bridge_id"] = bridge_id
+    temp.write_text(json.dumps(data, indent=2) + "\n")
     os.chmod(temp, 0o600)
     temp.replace(CONFIG_FILE)
 
 
-def request_json(method, bridge, path, app_key="", body=None, verify=False):
+def limited_text(value, limit=MAX_ERROR_TEXT):
+    text = value if isinstance(value, str) else str(value)
+    text = text.replace("\x00", "")
+    return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
+
+
+def bounded_read(response, limit):
+    headers = getattr(response, "headers", None)
+    content_length = headers.get("Content-Length") if headers is not None else None
+    if content_length is None and hasattr(response, "getheader"):
+        content_length = response.getheader("Content-Length")
+    if content_length is not None:
+        try:
+            content_length = int(content_length)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("Response has an invalid Content-Length") from error
+        if content_length < 0 or content_length > limit:
+            raise RuntimeError(f"Response exceeds the {limit}-byte limit")
+
+    data = response.read(limit + 1)
+    if not isinstance(data, bytes):
+        raise RuntimeError("Response body is not bytes")
+    if len(data) > limit:
+        raise RuntimeError(f"Response exceeds the {limit}-byte limit")
+    return data
+
+
+def response_error_body(response):
+    try:
+        return limited_text(bounded_read(response, MAX_ERROR_BYTES).decode(errors="replace"), MAX_ERROR_TEXT)
+    except RuntimeError:
+        return "Response error body exceeded its size limit"
+
+
+def bridge_ip(value):
+    address = str(value).strip()
+    try:
+        ipaddress.ip_address(address)
+    except ValueError as error:
+        raise RuntimeError("Bridge address must be an IP address") from error
+    return address
+
+
+def normalize_bridge_id(value):
+    bridge_id = str(value).strip() if value is not None else ""
+    return bridge_id.upper() if BRIDGE_ID_PATTERN.fullmatch(bridge_id) else ""
+
+
+def bridge_tls_context():
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.verify_mode = ssl.CERT_REQUIRED
+    context.check_hostname = False
+    context.load_verify_locations(cadata=HUE_BRIDGE_ROOT_CAS)
+    return context
+
+
+def peer_bridge_id(connection):
+    certificate = connection.sock.getpeercert()
+    subject = certificate.get("subject", ()) if certificate else ()
+    for relative_name in subject:
+        for name, value in relative_name:
+            if name == "commonName":
+                bridge_id = normalize_bridge_id(value)
+                if bridge_id:
+                    return bridge_id
+    raise RuntimeError("Hue Bridge certificate has no valid Bridge ID")
+
+
+def request_json(method, bridge, path, app_key="", body=None, expected_bridge_id=""):
+    bridge = bridge_ip(bridge)
+    if not path.startswith("/") or any(char in path for char in "\r\n"):
+        raise RuntimeError("Invalid Hue API path")
+    if app_key and not APP_KEY_PATTERN.fullmatch(app_key):
+        raise RuntimeError("Invalid Hue application key")
     headers = {"Accept": "application/json"}
     if app_key:
         headers["hue-application-key"] = app_key
@@ -49,17 +184,95 @@ def request_json(method, bridge, path, app_key="", body=None, verify=False):
     if body is not None:
         payload = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
-    scheme = "https" if path.startswith("/clip/") else "http"
-    context = ssl.create_default_context() if verify else ssl._create_unverified_context()
-    req = Request(f"{scheme}://{bridge}{path}", data=payload, headers=headers, method=method)
+    connection = http.client.HTTPSConnection(bridge, timeout=4, context=bridge_tls_context())
     try:
-        with urlopen(req, timeout=4, context=context if scheme == "https" else None) as response:
-            return json.loads(response.read().decode() or "{}")
-    except HTTPError as error:
-        detail = error.read().decode(errors="replace")
-        raise RuntimeError(f"Bridge returned HTTP {error.code}: {detail[:160]}") from error
-    except (URLError, TimeoutError, socket.timeout, http.client.HTTPException) as error:
-        raise RuntimeError(f"Bridge is unreachable: {error}") from error
+        connection.connect()
+        peer_id = peer_bridge_id(connection)
+        expected_id = normalize_bridge_id(expected_bridge_id)
+        if expected_bridge_id and not expected_id:
+            raise RuntimeError("Configured Bridge ID is invalid")
+        if expected_id and peer_id != expected_id:
+            raise RuntimeError("Hue Bridge identity changed; re-pair is required")
+        connection.request(method, path, body=payload, headers=headers)
+        response = connection.getresponse()
+        if response.status < 200 or response.status >= 300:
+            raw = bounded_read(response, MAX_ERROR_BYTES)
+            detail = limited_text(raw.decode(errors="replace"), MAX_ERROR_TEXT)
+            raise RuntimeError(f"Bridge returned HTTP {response.status}: {detail}")
+        raw = bounded_read(response, MAX_JSON_BYTES)
+        try:
+            data = json.loads(raw.decode() or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError("Bridge returned invalid JSON") from error
+        if path == "/api/config":
+            response_id = normalize_bridge_id(data.get("bridgeid") if isinstance(data, dict) else "")
+            if not response_id or response_id != peer_id:
+                raise RuntimeError("Hue Bridge certificate and API identity do not match")
+        return data
+    except RuntimeError:
+        raise
+    except (OSError, TimeoutError, ssl.SSLError, http.client.HTTPException) as error:
+        raise RuntimeError(f"Bridge is unreachable: {limited_text(error)}") from error
+    finally:
+        connection.close()
+
+
+def parse_ssdp_headers(payload):
+    headers = {}
+    for line in payload.decode(errors="replace").splitlines()[1:]:
+        if ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        headers[name.strip().lower()] = value.strip()
+    return headers
+
+
+def find_local_bridges():
+    """Find Hue Bridges on the local network without using the cloud endpoint."""
+    search_template = (
+        "M-SEARCH * HTTP/1.1\r\n"
+        "HOST: 239.255.255.250:1900\r\n"
+        "MAN: \"ssdp:discover\"\r\n"
+        "MX: 1\r\n"
+        "ST: {target}\r\n"
+        "\r\n"
+    ).encode()
+    candidates = {}
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+            sock.settimeout(0.25)
+            for target in ("upnp:rootdevice", "ssdp:all"):
+                sock.sendto(search_template.replace(b"{target}", target.encode()), ("239.255.255.250", 1900))
+
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                try:
+                    payload, _ = sock.recvfrom(8192)
+                except socket.timeout:
+                    continue
+                location = parse_ssdp_headers(payload).get("location", "")
+                parsed = urlparse(location)
+                host = parsed.hostname
+                if parsed.scheme in ("http", "https") and host and ":" not in host:
+                    candidates[host] = True
+                    if len(candidates) >= MAX_BRIDGES:
+                        break
+    except OSError:
+        return []
+
+    bridges = []
+    for bridge in sorted(candidates):
+        try:
+            info = request_json("GET", bridge, "/api/config")
+        except RuntimeError:
+            continue
+        if isinstance(info, dict) and normalize_bridge_id(info.get("bridgeid")):
+            bridges.append({
+                "bridge": bridge,
+                "name": limited_text(info.get("name", "Philips Hue Bridge"), MAX_LIGHT_NAME),
+            })
+    return bridges
 
 
 def discover():
@@ -67,12 +280,75 @@ def discover():
     try:
         req = Request("https://discovery.meethue.com/", headers={"Accept": "application/json"})
         with urlopen(req, timeout=5) as response:
-            items = json.loads(response.read().decode())
+            items = json.loads(bounded_read(response, MAX_DISCOVERY_BYTES).decode())
+        if not isinstance(items, list) or len(items) > MAX_BRIDGES:
+            raise RuntimeError("Discovery returned too many bridges")
         bridges = [{"bridge": str(item.get("internalipaddress", "")), "id": str(item.get("id", ""))} for item in items]
         bridges = [item for item in bridges if item["bridge"]]
         emit({"ok": True, "bridges": bridges})
+    except HTTPError as error:
+        emit({"ok": False, "error": f"No bridge found: HTTP {error.code}: {response_error_body(error)}"}, 1)
     except Exception as error:
-        emit({"ok": False, "error": f"No bridge found: {error}"}, 1)
+        emit({"ok": False, "error": f"No bridge found: {limited_text(error)}"}, 1)
+
+
+def bridge_identity(bridge):
+    info = request_json("GET", bridge, "/api/config")
+    bridge_id = normalize_bridge_id(info.get("bridgeid") if isinstance(info, dict) else "")
+    if not bridge_id:
+        raise RuntimeError("Hue Bridge returned an invalid Bridge ID")
+    return bridge_id
+
+
+def ensure_bridge_identity(config):
+    if not APP_KEY_PATTERN.fullmatch(config.get("app_key", "")):
+        raise RuntimeError("Stored Hue application key is invalid")
+    bridge_id = bridge_identity(config["bridge"])
+    stored_id = normalize_bridge_id(config.get("bridge_id", ""))
+    if stored_id and stored_id != bridge_id:
+        raise RuntimeError("Configured Bridge ID changed; re-pair is required")
+    if not stored_id:
+        save_config(config["bridge"], config["app_key"], bridge_id)
+    return bridge_id
+
+
+def hue_error(response, fallback="Hue API error"):
+    if isinstance(response, dict):
+        errors = response.get("errors")
+        if isinstance(errors, list) and errors and isinstance(errors[0], dict):
+            description = errors[0].get("description")
+            if isinstance(description, str) and description:
+                return limited_text(description)
+    return fallback
+
+
+def presence():
+    config = load_config()
+    if config["bridge"] and config["app_key"]:
+        try:
+            bridge_id = ensure_bridge_identity(config)
+            response = request_json("GET", config["bridge"], "/clip/v2/resource", config["app_key"], expected_bridge_id=bridge_id)
+            if response.get("errors"):
+                emit({"ok": False, "configured": True, "present": False, "error": hue_error(response)}, 1)
+            lights = light_rows(response)
+            emit({
+                "ok": True,
+                "configured": True,
+                "present": bool(lights),
+                "bridge": config["bridge"],
+                "lights": lights,
+                "on_count": sum(1 for light in lights if light["on"]),
+            })
+        except RuntimeError as error:
+            emit({"ok": False, "configured": True, "present": False, "bridge": config["bridge"], "error": limited_text(error)}, 1)
+
+    bridges = find_local_bridges()
+    emit({
+        "ok": True,
+        "configured": False,
+        "present": bool(bridges),
+        "bridges": bridges,
+    })
 
 
 def pair(bridge):
@@ -80,38 +356,61 @@ def pair(bridge):
     if not bridge:
         emit({"ok": False, "error": "Bridge address is missing"}, 2)
     try:
-        result = request_json("POST", bridge, "/api", body={"devicetype": "omarchy_hue#bar"})
-        first = result[0] if isinstance(result, list) and result else {}
-        if "success" in first:
-            key = first["success"].get("username", "")
-            save_config(bridge, key)
-            emit({"ok": True, "bridge": bridge})
-        error = first.get("error", {}).get("description", "Pairing failed")
-        emit({"ok": False, "error": error}, 1)
+        bridge_id = bridge_identity(bridge)
+        result = request_json("POST", bridge, "/api", body={"devicetype": "omarchy_hue#bar"}, expected_bridge_id=bridge_id)
+        try:
+            key = pairing_key(result)
+        except RuntimeError:
+            first = result[0] if isinstance(result, list) and result else {}
+            error = "Pairing failed"
+            if isinstance(first, dict) and isinstance(first.get("error"), dict):
+                error = limited_text(first["error"].get("description", error))
+            emit({"ok": False, "error": error}, 1)
+        save_config(bridge_ip(bridge), key, bridge_id)
+        emit({"ok": True, "bridge": bridge})
     except RuntimeError as error:
-        emit({"ok": False, "error": str(error)}, 1)
+        emit({"ok": False, "error": limited_text(error)}, 1)
+
+
+def pairing_key(result):
+    first = result[0] if isinstance(result, list) and result else {}
+    success = first.get("success") if isinstance(first, dict) else None
+    key = success.get("username") if isinstance(success, dict) else None
+    if not isinstance(key, str) or not APP_KEY_PATTERN.fullmatch(key):
+        raise RuntimeError("Bridge returned an invalid application key")
+    return key
 
 
 def light_rows(data):
-    resources = data.get("data", [])
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        raise RuntimeError("Hue response has an invalid resource list")
+    resources = data["data"]
+    if len(resources) > MAX_RESOURCES:
+        raise RuntimeError("Hue response contains too many resources")
     connectivity = {}
     for resource in resources:
+        if not isinstance(resource, dict):
+            raise RuntimeError("Hue response contains an invalid resource")
         if resource.get("type") != "zigbee_connectivity":
             continue
         owner = resource.get("owner", {})
         connectivity[str(owner.get("rid", ""))] = str(resource.get("status", ""))
 
     rows = []
+    light_count = 0
     for light in resources:
         if light.get("type") != "light":
             continue
+        light_count += 1
+        if light_count > MAX_LIGHTS:
+            raise RuntimeError("Hue response contains too many lights")
         device_id = str(light.get("owner", {}).get("rid", ""))
         # A Hue light is controllable only while its device connectivity says
         # connected. Hiding all other states also avoids optimistic controls
         # for powered-off or unreachable bulbs.
         if connectivity.get(device_id) != "connected":
             continue
-        metadata = light.get("metadata", {})
+        metadata = light.get("metadata", {}) if isinstance(light.get("metadata", {}), dict) else {}
         on = bool(light.get("on", {}).get("on", False))
         brightness = round(float(light.get("dimming", {}).get("brightness", 0)))
         color = light.get("color") if isinstance(light.get("color"), dict) else None
@@ -119,7 +418,7 @@ def light_rows(data):
         mirek_schema = color_temperature.get("mirek_schema", {}) if color_temperature else {}
         rows.append({
             "id": str(light.get("id", "")),
-            "name": str(metadata.get("name", "Light")),
+            "name": limited_text(metadata.get("name", "Light"), MAX_LIGHT_NAME),
             "on": on,
             "brightness": brightness,
             "color_capable": color is not None,
@@ -139,9 +438,10 @@ def status():
     if not config["bridge"] or not config["app_key"]:
         emit({"ok": False, "configured": False, "error": "Not paired with a Hue Bridge yet"})
     try:
-        response = request_json("GET", config["bridge"], "/clip/v2/resource", config["app_key"])
+        bridge_id = ensure_bridge_identity(config)
+        response = request_json("GET", config["bridge"], "/clip/v2/resource", config["app_key"], expected_bridge_id=bridge_id)
         if response.get("errors"):
-            emit({"ok": False, "configured": True, "error": str(response["errors"][0].get("description", "Hue API error"))}, 1)
+            emit({"ok": False, "configured": True, "error": hue_error(response)}, 1)
         lights = light_rows(response)
         emit({
             "ok": True,
@@ -151,7 +451,7 @@ def status():
             "on_count": sum(1 for light in lights if light["on"]),
         })
     except RuntimeError as error:
-        emit({"ok": False, "configured": True, "bridge": config["bridge"], "error": str(error)}, 1)
+        emit({"ok": False, "configured": True, "bridge": config["bridge"], "error": limited_text(error)}, 1)
 
 
 def srgb_to_xy(hex_color, gamut=None):
@@ -199,6 +499,8 @@ def update(light_id, on=None, brightness=None, color=None, gamut=None, xy=None, 
     config = load_config()
     if not config["bridge"] or not config["app_key"]:
         emit({"ok": False, "error": "Plugin is not paired"}, 2)
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", str(light_id)):
+        emit({"ok": False, "error": "Invalid light ID"}, 2)
     body = {}
     if on is not None:
         body["on"] = {"on": on}
@@ -216,18 +518,20 @@ def update(light_id, on=None, brightness=None, color=None, gamut=None, xy=None, 
         body["color_temperature"] = {"mirek": max(153, min(500, int(mirek)))}
         body.setdefault("on", {"on": True})
     try:
-        response = request_json("PUT", config["bridge"], f"/clip/v2/resource/light/{light_id}", config["app_key"], body)
+        bridge_id = ensure_bridge_identity(config)
+        response = request_json("PUT", config["bridge"], f"/clip/v2/resource/light/{light_id}", config["app_key"], body, expected_bridge_id=bridge_id)
         if response.get("errors"):
-            emit({"ok": False, "error": str(response["errors"][0].get("description", "Hue API error"))}, 1)
+            emit({"ok": False, "error": hue_error(response)}, 1)
         emit({"ok": True})
     except RuntimeError as error:
-        emit({"ok": False, "error": str(error)}, 1)
+        emit({"ok": False, "error": limited_text(error)}, 1)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    sub.add_parser("presence")
     sub.add_parser("discover")
     pair_parser = sub.add_parser("pair")
     pair_parser.add_argument("bridge")
@@ -241,6 +545,7 @@ def main():
     set_parser.add_argument("--mirek", type=int)
     args = parser.parse_args()
     if args.command == "status": status()
+    elif args.command == "presence": presence()
     elif args.command == "discover": discover()
     elif args.command == "pair": pair(args.bridge)
     elif args.command == "set":
