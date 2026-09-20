@@ -62,7 +62,7 @@ Removing the plugin does not delete the Hue application key. To revoke access co
 
 Omarchy plugins run unsandboxed with user permissions. This plugin executes its bundled Python client and communicates with the configured Hue Bridge over the local network. All bridge API and pairing requests use HTTPS with the Philips Hue bridge root CAs pinned in the client. The bridge certificate's ID must match the bridge ID returned by the authenticated TLS connection; that ID is stored alongside the application key and is checked on every later request. A pairing response is validated before the application key is stored.
 
-HTTP responses are bounded before JSON parsing, including error and discovery responses, and resource, light, name, and displayed error sizes are limited. Dynamic bridge data is rendered as plain text in the panel. Initial automatic discovery uses `https://discovery.meethue.com/` only for the manual **Find bridge** setup action. It does not use `sudo`, install packages, or execute downloaded code.
+HTTP responses are bounded before JSON parsing, including error and discovery responses, and resource, light, name, and displayed error sizes are limited. Dynamic bridge data is rendered as plain text in the panel. Initial automatic discovery uses `https://discovery.meethue.com/` only for the manual **Find bridge** setup action. It does not request elevated privileges, install packages, or execute downloaded code.
 
 The pinned roots follow Philips Hue's [HTTPS application design guidance](https://developers.meethue.com/develop/application-design-guidance/using-https/).
 
