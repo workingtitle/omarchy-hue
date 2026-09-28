@@ -158,6 +158,19 @@ class HueSecurityTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertLessEqual(len(rows[0]["name"]), huectl.MAX_LIGHT_NAME)
 
+    def test_xy_to_hue_saturation_inverts_srgb_to_xy(self):
+        # Same colors the panel sends: HSL at 50% lightness.
+        for color, hue, saturation in (("#ff0000", 0, 100), ("#00ff00", 120, 100), ("#0000ff", 240, 100),
+                                       ("#bf40bf", 300, 50), ("#40bfbf", 180, 50), ("#808080", 0, 0)):
+            x_val, y_val = huectl.srgb_to_xy(color)
+            result = huectl.xy_to_hue_saturation({"x": x_val, "y": y_val})
+            self.assertAlmostEqual(result[0], hue, delta=1, msg=color)
+            self.assertAlmostEqual(result[1], saturation, delta=1, msg=color)
+
+    def test_xy_to_hue_saturation_rejects_malformed_points(self):
+        for value in (None, {}, {"x": "a", "y": 0.3}, {"x": 0.3, "y": 0}, {"x": float("nan"), "y": 0.3}):
+            self.assertIsNone(huectl.xy_to_hue_saturation(value))
+
     def test_qml_uses_plain_text_and_bounds_dynamic_sinks(self):
         panel = (PLUGIN_DIR / "Panel.qml").read_text()
         self.assertGreaterEqual(panel.count("textFormat: Text.PlainText"), 3)

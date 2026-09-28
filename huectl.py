@@ -416,6 +416,7 @@ def light_rows(data):
         color = light.get("color") if isinstance(light.get("color"), dict) else None
         color_temperature = light.get("color_temperature") if isinstance(light.get("color_temperature"), dict) else None
         mirek_schema = color_temperature.get("mirek_schema", {}) if color_temperature else {}
+        hue_saturation = xy_to_hue_saturation(color.get("xy")) if color else None
         rows.append({
             "id": str(light.get("id", "")),
             "name": limited_text(metadata.get("name", "Light"), MAX_LIGHT_NAME),
@@ -424,6 +425,8 @@ def light_rows(data):
             "color_capable": color is not None,
             "gamut": color.get("gamut") if color else None,
             "xy": color.get("xy") if color else None,
+            "hue": hue_saturation[0] if hue_saturation else None,
+            "saturation": hue_saturation[1] if hue_saturation else None,
             "temperature_capable": color_temperature is not None,
             "mirek": color_temperature.get("mirek") if color_temperature else None,
             "mirek_min": mirek_schema.get("mirek_minimum", 153),
@@ -470,6 +473,46 @@ def srgb_to_xy(hex_color, gamut=None):
     total = x_val + y_val + z_val
     point = (x_val / total, y_val / total) if total else (0.0, 0.0)
     return clip_to_gamut(point, gamut) if gamut else point
+
+
+def xy_to_hue_saturation(xy):
+    """Invert srgb_to_xy onto the panel's HSL sliders (lightness fixed at 50%)."""
+    if not isinstance(xy, dict):
+        return None
+    try:
+        x_val = float(xy.get("x"))
+        y_val = float(xy.get("y"))
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(x_val) and math.isfinite(y_val)) or y_val <= 0:
+        return None
+    big_x = x_val / y_val
+    big_z = (1.0 - x_val - y_val) / y_val
+    linear = [
+        big_x * 1.656492 - 0.354851 - big_z * 0.255038,
+        -big_x * 0.707196 + 1.655397 + big_z * 0.036152,
+        big_x * 0.051713 - 0.121364 + big_z * 1.011530,
+    ]
+    peak = max(linear)
+    if peak <= 0:
+        return None
+    channels = [max(0.0, c / peak) for c in linear]
+    red, green, blue = [1.055 * c ** (1 / 2.4) - 0.055 if c > 0.0031308 else 12.92 * c for c in channels]
+    high, low = max(red, green, blue), min(red, green, blue)
+    delta = high - low
+    # Treat matrix rounding noise on neutral whites as gray.
+    if delta < 1e-3:
+        return (0, 0)
+    if high == red:
+        hue = ((green - blue) / delta) % 6
+    elif high == green:
+        hue = (blue - red) / delta + 2
+    else:
+        hue = (red - green) / delta + 4
+    # An HSL color at 50% lightness scaled to full intensity has
+    # min/max = (1 - s) / (1 + s), so s = (max - min) / (max + min).
+    saturation = delta / (high + low)
+    return (round(hue * 60) % 360, round(saturation * 100))
 
 
 def clip_to_gamut(point, gamut):

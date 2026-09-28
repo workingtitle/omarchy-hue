@@ -87,12 +87,38 @@ Panel {
     for (var i = 0; i < lights.length; i++) if (lights[i].id === selectedLightId) return lights[i]
     return null
   }
-  function showLight(light) {
-    selectedLightId = light.id
-    detailHue = 0
-    detailSaturation = 100
+  // HueSlider assigns `value` imperatively, which drops any declarative
+  // binding, so the shared detail sliders are synced explicitly.
+  function syncDetailBrightness() {
+    var light = selectedLight()
+    if (!light || brightnessSlider.dragging || detailBrightnessDebounce.running) return
+    brightnessSlider.value = light.brightness
   }
-  function showOverview() { selectedLightId = "" }
+  // Commit edits still waiting on a debounce to the light they were made on.
+  function flushDetailEdits() {
+    var light = selectedLight()
+    if (detailBrightnessDebounce.running) {
+      detailBrightnessDebounce.stop()
+      if (light) queueAction(["set", light.id, "--brightness", String(Math.round(brightnessSlider.value))], "Setting brightness for " + boundedText(light.name, "Light", maxLightNameLength) + "…")
+    }
+    if (detailColorDebounce.running) {
+      detailColorDebounce.stop()
+      if (light) setColor(light, detailColor.toString())
+    }
+  }
+  function showLight(light) {
+    flushDetailEdits()
+    selectedLightId = light.id
+    detailHue = typeof light.hue === "number" ? light.hue : 0
+    detailSaturation = typeof light.saturation === "number" ? light.saturation : 100
+    hueSlider.value = detailHue
+    saturationSlider.value = detailSaturation
+    syncDetailBrightness()
+  }
+  function showOverview() {
+    flushDetailEdits()
+    selectedLightId = ""
+  }
   function setAll(desired) {
     if (lights.length === 0 || backend.running) return
     batchQueue = []
@@ -166,6 +192,7 @@ Panel {
           present = lights.length > 0
           bridgeAddress = data.bridge || bridgeAddress
           message = lights.length === 0 ? "No reachable lights found" : onCount + " of " + lights.length + " lights on"
+          root.syncDetailBrightness()
         } else {
           if (data.configured === true) present = false
           message = root.boundedText(data.error, "Hue Bridge is unreachable", root.maxDisplayTextLength)
@@ -387,14 +414,15 @@ Panel {
           PanelSeparator { foreground: root.foreground }
           PanelSectionHeader { text: "BRIGHTNESS"; foreground: root.foreground; fontFamily: bar ? bar.fontFamily : Style.font.family }
           HueSlider {
+            id: brightnessSlider
             width: parent.width
             bar: root.bar
             minimum: 1; maximum: 100
             integer: true
             wheelStep: 5
-            value: detailView.light ? detailView.light.brightness : 1
+            value: 1
             onAdjusted: detailBrightnessDebounce.restart()
-            Timer { id: detailBrightnessDebounce; interval: 250; onTriggered: if (detailView.light) root.setLight(detailView.light.id, null, parent.value) }
+            Timer { id: detailBrightnessDebounce; interval: 250; onTriggered: if (detailView.light) root.setLight(detailView.light.id, null, brightnessSlider.value) }
           }
 
           Column {
@@ -425,6 +453,7 @@ Panel {
               spacing: Style.space(2)
               Text { text: "Hue"; color: root.foreground }
               HueSlider {
+                id: hueSlider
                 width: parent.width; bar: root.bar; minimum: 0; maximum: 360; wheelStep: 15; value: root.detailHue
                 fillColor: root.detailColor
                 knobColor: root.detailColor
@@ -447,6 +476,7 @@ Panel {
                 }
               }
               HueSlider {
+                id: saturationSlider
                 width: parent.width; bar: root.bar; minimum: 0; maximum: 100; wheelStep: 8; value: root.detailSaturation
                 fillColor: root.detailColor
                 knobColor: root.detailColor
