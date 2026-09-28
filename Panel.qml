@@ -204,7 +204,13 @@ Panel {
     var next = batchQueue.shift()
     run(next)
   }
-  function open() { cursorIndex = -1; controller.show(); Qt.callLater(refresh) }
+  function open() {
+    // Always start on the overview, without a keyboard selection.
+    showOverview()
+    cursorIndex = -1
+    controller.show()
+    Qt.callLater(refresh)
+  }
   function close() { controller.hide() }
   function toggle() { opened ? close() : open() }
   function closeForPopoutSwitch() { controller.hide() }
