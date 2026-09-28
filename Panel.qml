@@ -108,6 +108,7 @@ Panel {
   }
   function showLight(light) {
     flushDetailEdits()
+    flushRowBrightness()
     selectedLightId = light.id
     detailHue = typeof light.hue === "number" ? light.hue : 0
     detailSaturation = typeof light.saturation === "number" ? light.saturation : 100
@@ -115,8 +116,80 @@ Panel {
     saturationSlider.value = detailSaturation
     syncDetailBrightness()
   }
+  // Wheel or arrow keys on an overview row adjust that light's brightness.
+  // The value is shown immediately and sent once adjusting pauses; raising
+  // the brightness of a light that is off also switches it on.
+  property string wheelLightId: ""
+  property real wheelBrightness: 0
+  property bool wheelTurnOn: false
+  function rowBrightness(light) {
+    return light.id === wheelLightId ? Math.round(wheelBrightness) : light.brightness
+  }
+  function rowOn(light) {
+    return light.on || (light.id === wheelLightId && wheelTurnOn)
+  }
+  function wheelRow(light, event) {
+    var units = event.pixelDelta.y !== 0
+      ? -event.pixelDelta.y / 8
+      : -event.angleDelta.y / 120
+    adjustRowBrightness(light, units)
+  }
+  function adjustRowBrightness(light, units) {
+    if (units === 0) return
+    if (light.id !== wheelLightId) {
+      flushRowBrightness()
+      wheelLightId = light.id
+      wheelBrightness = light.brightness
+      wheelTurnOn = false
+    }
+    if (units > 0 && !light.on) wheelTurnOn = true
+    wheelBrightness = Math.max(1, Math.min(100, wheelBrightness + units * 5))
+    rowBrightnessDebounce.restart()
+  }
+  function flushRowBrightness() {
+    if (!rowBrightnessDebounce.running) return
+    rowBrightnessDebounce.stop()
+    sendRowBrightness()
+  }
+  function sendRowBrightness() {
+    for (var i = 0; i < lights.length; i++) {
+      if (lights[i].id !== wheelLightId) continue
+      var args = ["set", wheelLightId, "--brightness", String(Math.round(wheelBrightness))]
+      if (wheelTurnOn) args.push("--on", "true")
+      queueAction(args, "Setting brightness for " + boundedText(lights[i].name, "Light", maxLightNameLength) + "…")
+      return
+    }
+  }
+
+  // Keyboard navigation in the overview: Up/Down move the row cursor,
+  // Left/Right dim or brighten, Enter opens the light, Space toggles it.
+  property int cursorIndex: -1
+  property bool returnPressed: false
+  function moveCursor(dx, dy) {
+    if (selectedLightId !== "" || lights.length === 0) return
+    if (dy !== 0) {
+      cursorIndex = cursorIndex < 0
+        ? (dy > 0 ? 0 : lights.length - 1)
+        : Math.max(0, Math.min(lights.length - 1, cursorIndex + dy))
+    } else if (cursorIndex >= 0 && cursorIndex < lights.length) {
+      adjustRowBrightness(lights[cursorIndex], dx)
+    }
+  }
+  function activateCursor() {
+    var openDetail = returnPressed
+    returnPressed = false
+    if (selectedLightId !== "" || cursorIndex < 0 || cursorIndex >= lights.length) return
+    var light = lights[cursorIndex]
+    if (openDetail) showLight(light)
+    else setLight(light.id, !rowOn(light), null)
+  }
+  function escapePressed() {
+    if (selectedLightId !== "") showOverview()
+    else close()
+  }
   function showOverview() {
     flushDetailEdits()
+    for (var i = 0; i < lights.length; i++) if (lights[i].id === selectedLightId) cursorIndex = i
     selectedLightId = ""
   }
   function setAll(desired) {
@@ -131,7 +204,7 @@ Panel {
     var next = batchQueue.shift()
     run(next)
   }
-  function open() { controller.show(); Qt.callLater(refresh) }
+  function open() { cursorIndex = -1; controller.show(); Qt.callLater(refresh) }
   function close() { controller.hide() }
   function toggle() { opened ? close() : open() }
   function closeForPopoutSwitch() { controller.hide() }
@@ -193,6 +266,9 @@ Panel {
           bridgeAddress = data.bridge || bridgeAddress
           message = lights.length === 0 ? "No reachable lights found" : onCount + " of " + lights.length + " lights on"
           root.syncDetailBrightness()
+          // Keep the optimistic row value until the bridge reports it.
+          if (!rowBrightnessDebounce.running && !root.pendingActionArgs) root.wheelLightId = ""
+          if (root.cursorIndex >= lights.length) root.cursorIndex = lights.length - 1
         } else {
           if (data.configured === true) present = false
           message = root.boundedText(data.error, "Hue Bridge is unreachable", root.maxDisplayTextLength)
@@ -208,6 +284,7 @@ Panel {
   }
 
   Timer { id: refreshTimer; interval: 350; onTriggered: root.refresh() }
+  Timer { id: rowBrightnessDebounce; interval: 250; onTriggered: root.sendRowBrightness() }
   Timer { interval: 30000; running: true; repeat: true; onTriggered: root.refreshPresence() }
   Timer { interval: 15000; running: root.opened; repeat: true; onTriggered: root.refresh() }
 
@@ -220,9 +297,17 @@ Panel {
     centerOnBar: false
     contentWidth: fittedContentWidth(Style.space(440))
     contentHeight: fittedContentHeight(content.implicitHeight)
+    focusTarget: keyCatcher
 
-    Item {
+    PanelKeyCatcher {
+      id: keyCatcher
       anchors.fill: parent
+      blocked: bridgeField.activeFocus
+      onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onReturnRequested: root.returnPressed = true
+      onActivateRequested: root.activateCursor()
+      onCloseRequested: root.escapePressed()
+      onTextKey: function(t) { if (t === "r" && root.selectedLightId === "") root.refresh() }
 
       Column {
         id: content
@@ -322,9 +407,10 @@ Panel {
             delegate: Rectangle {
               id: compactLight
               required property var modelData
+              required property int index
               width: content.width
               height: Style.space(40)
-              color: rowMouse.containsMouse ? Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
+              color: root.cursorIndex === index ?Style.hoverFillFor(root.foreground, Color.accent) : "transparent"
 
               Rectangle {
                 anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
@@ -338,7 +424,7 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 width: Style.space(12); height: width; radius: width / 2
                 color: modelData.swatch || root.dim
-                opacity: modelData.on ? 1 : 0.3
+                opacity: root.rowOn(modelData) ? 1 : 0.3
                 border.width: 1
                 border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.35)
               }
@@ -353,7 +439,7 @@ Panel {
               Text {
                 anchors.right: rowSwitch.left; anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
-                text: modelData.brightness + "%  ›"
+                text: root.rowBrightness(modelData) + "%  ›"
                 color: root.dim
                 font.family: bar ? bar.fontFamily : Style.font.family
               }
@@ -361,7 +447,7 @@ Panel {
                 id: rowSwitch
                 anchors.right: parent.right; anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
-                checked: modelData.on
+                checked: root.rowOn(modelData)
                 busy: root.loading
                 foreground: root.foreground
                 accent: Color.accent
@@ -373,7 +459,17 @@ Panel {
                 anchors.left: parent.left; anchors.right: rowSwitch.left
                 anchors.top: parent.top; anchors.bottom: parent.bottom
                 hoverEnabled: true
+                // The pointer moves the keyboard cursor too, so keys continue from it.
+                onContainsMouseChanged: if (containsMouse) root.cursorIndex = compactLight.index
                 onClicked: root.showLight(compactLight.modelData)
+              }
+              MouseArea {
+                anchors.fill: parent
+                acceptedButtons: Qt.NoButton
+                onWheel: function(event) {
+                  root.wheelRow(compactLight.modelData, event)
+                  event.accepted = true
+                }
               }
             }
           }

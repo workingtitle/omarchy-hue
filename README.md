@@ -40,6 +40,17 @@ The generated Hue application key is stored outside the plugin repository with m
 
 Left-click the bar icon to open the panel. Right- and middle-click intentionally have no action. The overview lists only reachable lights with a dot showing each light's current color (dimmed while off) and provides **All on** and **All off** actions. Select a light to open its detail view.
 
+In the overview, scroll over a light (mouse wheel or two-finger touchpad gesture) to adjust its brightness; raising the brightness of a light that is off switches it on. The overview is also keyboard-driven:
+
+| Key | Action |
+| --- | --- |
+| **↑** / **↓** | Move the selection |
+| **←** / **→** | Dim or brighten the selected light |
+| **Enter** | Open the selected light |
+| **Space** | Switch the selected light on or off |
+| **R** | Refresh |
+| **Esc** | Back to the overview, or close the panel |
+
 The detail view provides power and brightness controls. Depending on the light's capabilities, it also offers hue and saturation controls plus **Warm**, **Neutral**, and **Cool** white-tone presets. Hover a slider and use the mouse wheel or a two-finger touchpad gesture to adjust its value.
 
 Unreachable lights are filtered using the Zigbee connectivity state reported by the bridge.
