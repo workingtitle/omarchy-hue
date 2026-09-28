@@ -332,8 +332,18 @@ Panel {
                 color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.1)
               }
 
-              Text {
+              Rectangle {
+                id: rowSwatch
                 anchors.left: parent.left; anchors.leftMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(12); height: width; radius: width / 2
+                color: modelData.swatch || root.dim
+                opacity: modelData.on ? 1 : 0.3
+                border.width: 1
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.35)
+              }
+              Text {
+                anchors.left: rowSwatch.right; anchors.leftMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.boundedText(modelData.name, "Light", root.maxLightNameLength)
                 textFormat: Text.PlainText

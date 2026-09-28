@@ -31,6 +31,7 @@ MAX_RESOURCES = 4096
 MAX_LIGHTS = 1024
 MAX_BRIDGES = 32
 MAX_LIGHT_NAME = 128
+WARM_WHITE_MIREK = 370
 BRIDGE_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{16}$")
 APP_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._~-]{8,128}$")
 
@@ -427,6 +428,8 @@ def light_rows(data):
             "xy": color.get("xy") if color else None,
             "hue": hue_saturation[0] if hue_saturation else None,
             "saturation": hue_saturation[1] if hue_saturation else None,
+            "swatch": light_swatch(color.get("xy") if color else None,
+                                   color_temperature.get("mirek") if color_temperature else None),
             "temperature_capable": color_temperature is not None,
             "mirek": color_temperature.get("mirek") if color_temperature else None,
             "mirek_min": mirek_schema.get("mirek_minimum", 153),
@@ -475,8 +478,8 @@ def srgb_to_xy(hex_color, gamut=None):
     return clip_to_gamut(point, gamut) if gamut else point
 
 
-def xy_to_hue_saturation(xy):
-    """Invert srgb_to_xy onto the panel's HSL sliders (lightness fixed at 50%)."""
+def xy_to_display_rgb(xy):
+    """Invert srgb_to_xy to gamma-encoded sRGB at full intensity (max channel 1)."""
     if not isinstance(xy, dict):
         return None
     try:
@@ -497,8 +500,16 @@ def xy_to_hue_saturation(xy):
     if peak <= 0:
         return None
     channels = [max(0.0, c / peak) for c in linear]
-    red, green, blue = [1.055 * c ** (1 / 2.4) - 0.055 if c > 0.0031308 else 12.92 * c for c in channels]
-    high, low = max(red, green, blue), min(red, green, blue)
+    return tuple(1.055 * c ** (1 / 2.4) - 0.055 if c > 0.0031308 else 12.92 * c for c in channels)
+
+
+def xy_to_hue_saturation(xy):
+    """Map a Hue xy point onto the panel's HSL sliders (lightness fixed at 50%)."""
+    rgb = xy_to_display_rgb(xy)
+    if rgb is None:
+        return None
+    red, green, blue = rgb
+    high, low = max(rgb), min(rgb)
     delta = high - low
     # Treat matrix rounding noise on neutral whites as gray.
     if delta < 1e-3:
@@ -513,6 +524,37 @@ def xy_to_hue_saturation(xy):
     # min/max = (1 - s) / (1 + s), so s = (max - min) / (max + min).
     saturation = delta / (high + low)
     return (round(hue * 60) % 360, round(saturation * 100))
+
+
+def mirek_to_xy(mirek):
+    """Planckian locus approximation (Kim et al.) for a white tone in mirek."""
+    try:
+        kelvin = 1_000_000 / float(mirek)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    if not math.isfinite(kelvin):
+        return None
+    kelvin = max(1667.0, min(25000.0, kelvin))
+    if kelvin <= 4000:
+        x_val = -0.2661239e9 / kelvin ** 3 - 0.2343589e6 / kelvin ** 2 + 0.8776956e3 / kelvin + 0.179910
+    else:
+        x_val = -3.0258469e9 / kelvin ** 3 + 2.1070379e6 / kelvin ** 2 + 0.2226347e3 / kelvin + 0.240390
+    if kelvin <= 2222:
+        y_val = -1.1063814 * x_val ** 3 - 1.34811020 * x_val ** 2 + 2.18555832 * x_val - 0.20219683
+    elif kelvin <= 4000:
+        y_val = -0.9549476 * x_val ** 3 - 1.37418593 * x_val ** 2 + 2.09137015 * x_val - 0.16748867
+    else:
+        y_val = 3.0817580 * x_val ** 3 - 5.87338670 * x_val ** 2 + 3.75112997 * x_val - 0.37001483
+    return {"x": x_val, "y": y_val}
+
+
+def light_swatch(xy, mirek):
+    """Hex color approximating what a light emits, for the overview."""
+    # White-only bulbs report neither; assume the common 2700 K warm white.
+    rgb = xy_to_display_rgb(xy) or xy_to_display_rgb(mirek_to_xy(mirek if mirek else WARM_WHITE_MIREK))
+    if rgb is None:
+        return None
+    return "#" + "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in rgb)
 
 
 def clip_to_gamut(point, gamut):

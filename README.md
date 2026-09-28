@@ -38,7 +38,7 @@ The generated Hue application key is stored outside the plugin repository with m
 
 ## Usage
 
-Left-click the bar icon to open the panel. Right- and middle-click intentionally have no action. The overview lists only reachable lights and provides **All on** and **All off** actions. Select a light to open its detail view.
+Left-click the bar icon to open the panel. Right- and middle-click intentionally have no action. The overview lists only reachable lights with a dot showing each light's current color (dimmed while off) and provides **All on** and **All off** actions. Select a light to open its detail view.
 
 The detail view provides power and brightness controls. Depending on the light's capabilities, it also offers hue and saturation controls plus **Warm**, **Neutral**, and **Cool** white-tone presets. Hover a slider and use the mouse wheel or a two-finger touchpad gesture to adjust its value.
 

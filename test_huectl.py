@@ -171,6 +171,17 @@ class HueSecurityTests(unittest.TestCase):
         for value in (None, {}, {"x": "a", "y": 0.3}, {"x": 0.3, "y": 0}, {"x": float("nan"), "y": 0.3}):
             self.assertIsNone(huectl.xy_to_hue_saturation(value))
 
+    def test_light_swatch_uses_xy_then_white_tone_then_warm_white(self):
+        x_val, y_val = huectl.srgb_to_xy("#ff0000")
+        self.assertEqual(huectl.light_swatch({"x": x_val, "y": y_val}, None), "#ff0000")
+        cool = huectl.light_swatch(None, 153)
+        warm = huectl.light_swatch(None, 454)
+        self.assertRegex(cool, "^#[0-9a-f]{6}$")
+        # Warm whites carry less blue than cool ones.
+        self.assertLess(int(warm[5:7], 16), int(cool[5:7], 16))
+        self.assertEqual(huectl.light_swatch(None, None), huectl.light_swatch(None, huectl.WARM_WHITE_MIREK))
+        self.assertEqual(huectl.light_swatch({"x": "bad"}, None), huectl.light_swatch(None, huectl.WARM_WHITE_MIREK))
+
     def test_qml_uses_plain_text_and_bounds_dynamic_sinks(self):
         panel = (PLUGIN_DIR / "Panel.qml").read_text()
         self.assertGreaterEqual(panel.count("textFormat: Text.PlainText"), 3)
